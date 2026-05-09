@@ -6,10 +6,11 @@ import 'package:ffmpeg_kit_flutter_new/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_flutter_new/ffprobe_kit.dart';
 import 'package:ffmpeg_kit_flutter_new/return_code.dart';
 import 'package:ffmpeg_kit_flutter_new/statistics.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import 'package:gal/gal.dart';
-import 'package:image_picker/image_picker.dart';
+import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:share_plus/share_plus.dart';
 
 void main() {
@@ -127,7 +128,6 @@ class OptimizerScreen extends StatefulWidget {
 }
 
 class _OptimizerScreenState extends State<OptimizerScreen> {
-  final _picker = ImagePicker();
   XFile? _source;
   String? _outputPath;
   String? _error;
@@ -137,10 +137,31 @@ class _OptimizerScreenState extends State<OptimizerScreen> {
   int? _sessionId;
   bool _isEncoding = false;
   bool _isSaving = false;
+  static const _storageChannel = MethodChannel('storyfit/storage');
 
   Future<void> _pickVideo() async {
-    final picked = await _picker.pickVideo(source: ImageSource.gallery);
-    if (picked == null) return;
+    setState(() {
+      _error = null;
+      _status = 'Checking video access';
+    });
+
+    final hasAccess = await _requestVideoAccess();
+    if (!hasAccess) return;
+
+    final result = await FilePicker.pickFiles(
+      type: FileType.video,
+      allowMultiple: false,
+      withData: false,
+    );
+    final file = result?.files.single;
+    final path = file?.path;
+    if (path == null) {
+      if (!mounted) return;
+      setState(() => _status = 'Ready');
+      return;
+    }
+
+    final picked = XFile(path, name: file?.name);
 
     setState(() {
       _source = picked;
@@ -152,6 +173,34 @@ class _OptimizerScreenState extends State<OptimizerScreen> {
     });
 
     unawaited(_loadDuration(picked.path));
+  }
+
+  Future<bool> _requestVideoAccess() async {
+    if (!Platform.isAndroid) return true;
+
+    final statuses = await [
+      Permission.videos,
+      Permission.storage,
+    ].request();
+
+    final granted = statuses.values.any(
+      (status) => status.isGranted || status.isLimited,
+    );
+    if (granted) return true;
+
+    final permanentlyDenied = statuses.values.any((status) => status.isPermanentlyDenied);
+    if (!mounted) return false;
+    setState(() {
+      _status = 'Permission needed';
+      _error = permanentlyDenied
+          ? 'Video access is blocked. Open app settings and allow video or storage access.'
+          : 'Please allow video access to pick a file.';
+    });
+
+    if (permanentlyDenied) {
+      unawaited(openAppSettings());
+    }
+    return false;
   }
 
   Future<void> _loadDuration(String path) async {
@@ -264,16 +313,18 @@ class _OptimizerScreenState extends State<OptimizerScreen> {
 
     setState(() => _isSaving = true);
     try {
-      final hasAccess = await Gal.hasAccess();
-      if (!hasAccess) {
-        await Gal.requestAccess();
+      if (Platform.isAndroid) {
+        await Permission.storage.request();
       }
-      await Gal.putVideo(output, album: 'StoryFit');
+      await _storageChannel.invokeMethod<String>('saveVideoToMovies', {
+        'path': output,
+        'name': _fileName(output),
+      });
       if (!mounted) return;
-      setState(() => _status = 'Saved to gallery');
-    } on GalException catch (error) {
+      setState(() => _status = 'Saved to Movies/StoryFit');
+    } on PlatformException catch (error) {
       if (!mounted) return;
-      setState(() => _error = error.type.message);
+      setState(() => _error = error.message ?? 'Could not save the video to local storage.');
     } finally {
       if (mounted) setState(() => _isSaving = false);
     }
